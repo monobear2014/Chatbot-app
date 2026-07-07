@@ -23,4 +23,4 @@ A simple Retrieval-Augmented Generation (RAG) chatbot built with Streamlit. User
 
 ## 📌 Notes
 
-This project demonstrates the basic workflow of a RAG application, including document ingestion, embedding generation, vector search, and question answering through an LLM
+This project demonstrates the basic workflow of a RAG application, including document ingestion, embedding generation, vector search, and question answering through an LLM.
