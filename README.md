@@ -11,7 +11,7 @@ A simple Retrieval-Augmented Generation (RAG) chatbot built with Streamlit. User
 - Retrieve the most relevant context for user queries
 - Interactive chat interface built with Streamlit
 
-## 🛠️ Tech Stack
+## 🛠️ Tech Stack.
 
 - Python
 - Streamlit
