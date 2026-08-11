@@ -2,3 +2,6 @@
 .env
 __pycache__/
 eval_results/
+.streamlit/secrets.toml
+.DS_Store
+*.log
