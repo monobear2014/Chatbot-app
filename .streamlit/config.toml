@@ -1,7 +1,22 @@
+# Theme map từ design.md (warm-canvas editorial system)
 [theme]
 base = "light"
-primaryColor = "#6952CC"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F7F6F4"
-textColor = "#37352F"
-font = "sans serif"
+primaryColor = "#cc785c"              # colors.primary — coral CTA
+backgroundColor = "#faf9f5"           # colors.canvas — cream, không dùng trắng thuần
+secondaryBackgroundColor = "#f5f0e8"  # colors.surface-soft
+textColor = "#141413"                 # colors.ink
+linkColor = "#cc785c"                 # text-link dùng coral
+borderColor = "#e6dfd8"               # colors.hairline
+dataframeBorderColor = "#e6dfd8"
+codeBackgroundColor = "#f5f0e8"
+showWidgetBorder = true
+baseRadius = "8px"                    # rounded.md cho button + input
+baseFontSize = 16                     # typography.body-md
+font = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+headingFont = "'Cormorant Garamond', 'EB Garamond', Garamond, 'Times New Roman', serif"
+codeFont = "'JetBrains Mono', ui-monospace, SFMono-Regular, monospace"
+
+[theme.sidebar]
+backgroundColor = "#f5f0e8"
+secondaryBackgroundColor = "#efe9de"  # colors.surface-card
+borderColor = "#e6dfd8"
