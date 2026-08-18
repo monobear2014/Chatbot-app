@@ -10,10 +10,11 @@ import re
 from html import escape
 
 import streamlit as st
+from openai import APIError, APIStatusError
 
 from rag_core import (
     EMBED_MODEL,
-    GEMINI_API_KEY,
+    OPENAI_API_KEY,
     LLM_MODEL,
     process_pdf_files,
     rag_stream,
@@ -23,8 +24,8 @@ from rag_core import (
 st.set_page_config(page_title="PDF RAG Assistant", page_icon="📄",
                    layout="wide", initial_sidebar_state="expanded")
 
-if not GEMINI_API_KEY:
-    st.error("Thiếu GEMINI_API_KEY. Hãy thêm vào .streamlit/secrets.toml (local) hoặc Settings → Secrets (Streamlit Cloud).")
+if not OPENAI_API_KEY:
+    st.error("Thiếu OPENAI_API_KEY. Hãy thêm vào .streamlit/secrets.toml (local) hoặc Settings → Secrets (Streamlit Cloud).")
     st.stop()
 
 
@@ -288,12 +289,19 @@ with st.sidebar:
     files = st.file_uploader("Chọn một hoặc nhiều file PDF", type="pdf",
                              accept_multiple_files=True, label_visibility="collapsed")
     if files and st.button("Xử lý PDF", use_container_width=True, type="primary"):
-        with st.spinner(f"Đang đọc, tách bảng và tạo embedding cho {len(files)} file..."):
-            st.session_state.collection, st.session_state.n_chunks = process_pdf_files(files)
-            st.session_state.pdf_names = [f.name for f in files]
-            st.session_state.chat_history = []
-            st.session_state.suggested_questions = suggest_questions(st.session_state.collection)
-        st.rerun()
+        try:
+            with st.spinner(f"Đang đọc, tách bảng và tạo embedding cho {len(files)} file..."):
+                st.session_state.collection, st.session_state.n_chunks = process_pdf_files(files)
+                st.session_state.pdf_names = [f.name for f in files]
+                st.session_state.chat_history = []
+                st.session_state.suggested_questions = suggest_questions(st.session_state.collection)
+        except APIStatusError as e:
+            st.error(f"OpenAI API lỗi (mã {e.status_code}). Đã thử lại vài lần nhưng vẫn thất bại — "
+                      "hãy đợi một chút rồi bấm **Xử lý PDF** lại.")
+        except APIError as e:
+            st.error(f"Lỗi gọi OpenAI API: {e}")
+        else:
+            st.rerun()
 
     # Tên file không lặp lại ở đây: widget uploader phía trên đã liệt kê sẵn.
 
@@ -377,8 +385,17 @@ if q:
     with st.chat_message("user"):
         st.write(q)
     with st.chat_message("assistant"):
-        with st.spinner(f"Đang truy hồi {top_k} đoạn liên quan..."):
-            stream, sources = rag_stream(q, st.session_state.collection, k=top_k)
-        ans = st.write_stream(stream)
-        render_sources(sources)
-    st.session_state.chat_history.append({"role": "assistant", "content": ans, "sources": sources})
+        try:
+            with st.spinner(f"Đang truy hồi {top_k} đoạn liên quan..."):
+                stream, sources = rag_stream(q, st.session_state.collection, k=top_k)
+            ans = st.write_stream(stream)
+            render_sources(sources)
+        except APIStatusError as e:
+            ans, sources = None, []
+            st.error(f"OpenAI API lỗi (mã {e.status_code}). Đã thử lại vài lần nhưng vẫn thất bại — "
+                      "hãy thử hỏi lại sau ít phút.")
+        except APIError as e:
+            ans, sources = None, []
+            st.error(f"Lỗi gọi OpenAI API: {e}")
+    if ans is not None:
+        st.session_state.chat_history.append({"role": "assistant", "content": ans, "sources": sources})

@@ -9,29 +9,41 @@ import re
 import chromadb
 import pdfplumber
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from openai import OpenAI
+from openai import APIConnectionError, InternalServerError, RateLimitError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
+# OpenAI thỉnh thoảng trả 5xx (quá tải) hoặc 429 (rate limit per-minute, khác quota
+# theo ngày của free tier) -> retry với backoff thay vì để lỗi văng thẳng lên UI.
+# Public vì evaluate_rag.py cũng cần áp dụng cho lệnh gọi openai_client trực tiếp
+# (sinh testset).
+retry_on_overload = retry(
+    retry=retry_if_exception_type((InternalServerError, RateLimitError, APIConnectionError)),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=1, max=20),
+    reraise=True,
+)
+
 
 def get_api_key():
-    key = os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("OPENAI_API_KEY")
     if key:
         return key
     try:
         import streamlit as st
-        return st.secrets.get("GEMINI_API_KEY", "")
+        return st.secrets.get("OPENAI_API_KEY", "")
     except Exception:
         return ""
 
 
-GEMINI_API_KEY = get_api_key()
-genai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+OPENAI_API_KEY = get_api_key()
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 client = chromadb.Client()
 
-LLM_MODEL = "gemini-flash-latest"
-EMBED_MODEL = "gemini-embedding-001"
+LLM_MODEL = "gpt-4o-mini"
+EMBED_MODEL = "text-embedding-3-small"
 
 PROMPT = """Bạn là trợ lý hỏi đáp. Dùng các đoạn ngữ cảnh dưới đây để trả lời câu hỏi.
 Nếu ngữ cảnh không có thông tin, hãy nói là bạn không biết, đừng bịa.
@@ -46,13 +58,10 @@ Câu hỏi: {question}
 Trả lời:"""
 
 
-def embed(texts, task_type="RETRIEVAL_DOCUMENT"):
-    resp = genai_client.models.embed_content(
-        model=EMBED_MODEL,
-        contents=texts,
-        config=types.EmbedContentConfig(task_type=task_type),
-    )
-    return [e.values for e in resp.embeddings]
+@retry_on_overload
+def embed(texts):
+    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=texts)
+    return [d.embedding for d in resp.data]
 
 
 def chunk_text(text, size=1000, overlap=200):
@@ -249,7 +258,7 @@ def process_pdf_paths(paths, collection_name="rag_eval"):
 
 def retrieve(question, col, k=4):
     """Truy hồi context: trả về (docs, metadatas, sources)."""
-    res = col.query(query_embeddings=embed([question], "RETRIEVAL_QUERY"), n_results=k)
+    res = col.query(query_embeddings=embed([question]), n_results=k)
     docs = res["documents"][0]
     metadatas = res["metadatas"][0]
     sources = [{"source": m["source"], "page": m["page"], "kind": m.get("kind", "text"), "text": d}
@@ -257,14 +266,25 @@ def retrieve(question, col, k=4):
     return docs, metadatas, sources
 
 
+@retry_on_overload
 def generate_answer(question, context):
     """Sinh câu trả lời (non-streaming) — dùng cho evaluation."""
-    resp = genai_client.models.generate_content(
+    resp = openai_client.chat.completions.create(
         model=LLM_MODEL,
-        contents=PROMPT.format(context=context, question=question),
-        config=types.GenerateContentConfig(temperature=0),
+        messages=[{"role": "user", "content": PROMPT.format(context=context, question=question)}],
+        temperature=0,
     )
-    return resp.text
+    return resp.choices[0].message.content
+
+
+@retry_on_overload
+def _generate_stream(question, context):
+    return openai_client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": PROMPT.format(context=context, question=question)}],
+        temperature=0,
+        stream=True,
+    )
 
 
 def rag_stream(question, col, k=4):
@@ -273,18 +293,18 @@ def rag_stream(question, col, k=4):
     context = "\n\n".join(docs)
 
     def stream():
-        resp = genai_client.models.generate_content_stream(
-            model=LLM_MODEL,
-            contents=PROMPT.format(context=context, question=question),
-            config=types.GenerateContentConfig(temperature=0),
-        )
+        # Gọi (và retry nếu cần) trước khi bắt đầu yield, để lỗi 5xx/429 không lọt
+        # ra giữa chừng stream mà được retry xong trước khi UI thấy chữ đầu tiên.
+        resp = _generate_stream(question, context)
         for chunk in resp:
-            if chunk.text:
-                yield chunk.text
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
 
     return stream(), sources
 
 
+@retry_on_overload
 def suggest_questions(col, n=3):
     """Sinh sẵn vài câu hỏi gợi ý dựa trên nội dung tài liệu vừa index."""
     sample = col.get(limit=6)["documents"]
@@ -296,8 +316,9 @@ Tài liệu:
 {context}
 
 Câu hỏi đề xuất:"""
-    resp = genai_client.models.generate_content(
-        model=LLM_MODEL, contents=prompt, config=types.GenerateContentConfig(temperature=0.7)
+    resp = openai_client.chat.completions.create(
+        model=LLM_MODEL, messages=[{"role": "user", "content": prompt}], temperature=0.7
     )
-    lines = [l.strip("-•*0123456789. ").strip() for l in resp.text.strip().split("\n") if l.strip()]
+    text = resp.choices[0].message.content.strip()
+    lines = [l.strip("-•*0123456789. ").strip() for l in text.split("\n") if l.strip()]
     return lines[:n]

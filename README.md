@@ -1,6 +1,6 @@
 # 📄 PDF RAG Chatbot
 
-Chatbot hỏi đáp tài liệu PDF theo kiến trúc RAG (Retrieval-Augmented Generation), dùng **Gemini API** cho cả embedding và sinh câu trả lời, **ChromaDB** làm vector store và **Streamlit** cho giao diện. Mọi câu trả lời đều kèm **trích dẫn nguồn** (tên file + số trang) và được **stream** theo từng chữ.
+Chatbot hỏi đáp tài liệu PDF theo kiến trúc RAG (Retrieval-Augmented Generation), dùng **OpenAI API** cho cả embedding và sinh câu trả lời, **ChromaDB** làm vector store và **Streamlit** cho giao diện. Mọi câu trả lời đều kèm **trích dẫn nguồn** (tên file + số trang) và được **stream** theo từng chữ.
 
 🔗 **Demo:** https://chatbot-app-5khn8fg5ouo7e2gtk9eprh.streamlit.app/
 
@@ -24,11 +24,11 @@ PDF ──►─┤                                                 ├──►
         └─► text (đã loại vùng bảng) ──► chunk 1000/200 ──┘   {source, page, kind}
                             │
                             ▼
-              gemini-embedding-001 ──► ChromaDB (in-memory)
+              text-embedding-3-small ──► ChromaDB (in-memory)
                                               │
-   câu hỏi ──► embedding (RETRIEVAL_QUERY) ──►│ top-k đoạn gần nghĩa nhất
+        câu hỏi ──► embedding ──────────────►│ top-k đoạn gần nghĩa nhất
                                               ▼
-                        prompt (ngữ cảnh + câu hỏi) ──► gemini-flash-latest
+                        prompt (ngữ cảnh + câu hỏi) ──► gpt-4o-mini
                                               ▼
                               câu trả lời (stream) + trích dẫn nguồn
 ```
@@ -63,16 +63,16 @@ UI dựng theo design system trong [design.md](design.md) — hệ "warm-canvas 
 pip install -r requirements.txt
 ```
 
-Lấy API key tại [Google AI Studio](https://aistudio.google.com/apikey), rồi khai báo theo **một** trong hai cách:
+Lấy API key tại [OpenAI Platform](https://platform.openai.com/api-keys) (cần bật billing để tránh giới hạn free tier rất thấp), rồi khai báo theo **một** trong hai cách:
 
 ```bash
 # 1) biến môi trường / file .env
-echo "GEMINI_API_KEY=your_key_here" > .env
+echo "OPENAI_API_KEY=your_key_here" > .env
 ```
 
 ```toml
 # 2) .streamlit/secrets.toml  (dùng cho Streamlit Cloud: Settings → Secrets)
-GEMINI_API_KEY = "your_key_here"
+OPENAI_API_KEY = "your_key_here"
 ```
 
 ## ▶️ Chạy app
@@ -98,15 +98,15 @@ Script sẽ: index PDF → tự sinh testset `(question, ground_truth)` từ cá
 | `context_precision` | Đoạn truy hồi có liên quan, ít nhiễu |
 | `context_recall` | Ngữ cảnh có chứa đủ thông tin để trả lời |
 
-> ⚠️ **Quota:** Gemini free tier giới hạn số request/phút và /ngày. Script đã có rate-limiter (`RATE_LIMIT_SLEEP = 13`), nhưng chạy nhiều câu hỏi vẫn có thể gặp `429 RESOURCE_EXHAUSTED`. Khi đó hãy giảm `--n-questions` hoặc chạy lại sau khi quota reset.
+> ⚠️ **Quota:** free tier của OpenAI giới hạn rất thấp (vài request/ngày cho tài khoản chưa nạp tiền) — **cần bật billing** trước khi chạy eval hoặc dùng app thật sự, nếu không sẽ gặp `429 RESOURCE_EXHAUSTED` ngay cả với vài câu hỏi. Pipeline (`rag_core.py`) đã tự động retry (backoff) khi gặp lỗi 5xx/429 thoáng qua, nhưng không retry được nếu quota bị chặn hẳn.
 
 ## ⚠️ Giới hạn hiện tại
 
-- **Ảnh trong PDF chưa được đọc.** Chỉ text layer được index, nên nội dung sơ đồ/biểu đồ/ảnh kết quả bị mất (chỉ còn caption). Hỏi về nội dung một hình, bot sẽ trả lời "không biết" — đúng hành vi, nhưng thông tin vẫn thiếu. Muốn hỗ trợ thì cần render trang thành ảnh và cho Gemini (multimodal) mô tả, tốn 1 API call mỗi trang.
+- **Ảnh trong PDF chưa được đọc.** Chỉ text layer được index, nên nội dung sơ đồ/biểu đồ/ảnh kết quả bị mất (chỉ còn caption). Hỏi về nội dung một hình, bot sẽ trả lời "không biết" — đúng hành vi, nhưng thông tin vẫn thiếu. Muốn hỗ trợ thì cần render trang thành ảnh và cho GPT-4o (multimodal) mô tả, tốn 1 API call mỗi trang.
 - **Bảng dạng ảnh (scan/screenshot) không đọc được** — cần OCR.
 - Bảng nằm vắt qua 2 trang được index thành 2 chunk riêng, header không tự lặp sang trang sau.
 - Vector store là ChromaDB in-memory: restart app là mất index, phải upload lại.
 
 ## 🛠️ Tech stack
 
-Python · Streamlit · Google Gemini API (`google-genai`) · ChromaDB · pdfplumber · RAGAS · LangChain (wrapper cho RAGAS)
+Python · Streamlit · OpenAI API (`openai`) · ChromaDB · pdfplumber · RAGAS · LangChain (`langchain-openai`, wrapper cho RAGAS)

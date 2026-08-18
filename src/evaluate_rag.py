@@ -2,7 +2,7 @@
 
 Quy trình:
 1. Index PDF (dùng đúng pipeline của app: rag_core.py).
-2. Tự sinh bộ câu hỏi + đáp án chuẩn (ground truth) từ các đoạn văn bản trong PDF, bằng Gemini.
+2. Tự sinh bộ câu hỏi + đáp án chuẩn (ground truth) từ các đoạn văn bản trong PDF, bằng OpenAI.
 3. Chạy từng câu hỏi qua pipeline RAG thật (retrieve + generate) để lấy answer + retrieved_contexts.
 4. Chấm điểm bằng RAGAS: faithfulness, answer_relevancy, context_precision, context_recall.
 5. In bảng kết quả + lưu CSV.
@@ -18,7 +18,6 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from google.genai import types
 from ragas import EvaluationDataset, SingleTurnSample, evaluate
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
@@ -30,13 +29,13 @@ from ragas.metrics import (
 )
 from ragas.run_config import RunConfig
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 import rag_core
 
-# Gemini free tier giới hạn 5 request/phút cho generate_content -> chờ giữa các lệnh gọi
-# để tránh lỗi 429 RESOURCE_EXHAUSTED khi tự sinh testset / sinh câu trả lời.
-RATE_LIMIT_SLEEP = 13
+# Billing đã bật -> quota cao hơn nhiều so với free tier, chỉ cần giãn nhẹ giữa các
+# lệnh gọi để tránh burst, không cần chờ theo giới hạn 5 request/phút của free tier nữa.
+RATE_LIMIT_SLEEP = 1
 
 QA_GEN_PROMPT = """Dựa CHỈ vào đoạn văn bản dưới đây, hãy đặt 1 câu hỏi và đưa ra câu trả lời chuẩn cho câu hỏi đó.
 Câu hỏi phải hỏi về một thông tin cụ thể có trong đoạn văn bản (không hỏi chung chung).
@@ -46,6 +45,16 @@ Câu trả lời phải ngắn gọn, chính xác, chỉ dựa vào đoạn văn
 {chunk}
 
 Trả về đúng định dạng JSON: {{"question": "...", "answer": "..."}}"""
+
+
+@rag_core.retry_on_overload
+def _generate_qa(chunk):
+    return rag_core.openai_client.chat.completions.create(
+        model=rag_core.LLM_MODEL,
+        messages=[{"role": "user", "content": QA_GEN_PROMPT.format(chunk=chunk)}],
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
 
 
 def generate_testset(col, n_questions):
@@ -59,13 +68,9 @@ def generate_testset(col, n_questions):
 
     testset = []
     for chunk in sampled:
-        resp = rag_core.genai_client.models.generate_content(
-            model=rag_core.LLM_MODEL,
-            contents=QA_GEN_PROMPT.format(chunk=chunk),
-            config=types.GenerateContentConfig(temperature=0.3, response_mime_type="application/json"),
-        )
+        resp = _generate_qa(chunk)
         try:
-            qa = json.loads(resp.text)
+            qa = json.loads(resp.choices[0].message.content)
             if qa.get("question") and qa.get("answer"):
                 testset.append({"question": qa["question"].strip(), "ground_truth": qa["answer"].strip()})
         except (json.JSONDecodeError, AttributeError):
@@ -100,8 +105,8 @@ def main():
     parser.add_argument("--out", default="eval_results", help="Thư mục lưu kết quả")
     args = parser.parse_args()
 
-    if not rag_core.GEMINI_API_KEY:
-        print("Thiếu GEMINI_API_KEY (đặt trong .env).", file=sys.stderr)
+    if not rag_core.OPENAI_API_KEY:
+        print("Thiếu OPENAI_API_KEY (đặt trong .env).", file=sys.stderr)
         sys.exit(1)
 
     print(f"[1/4] Index {len(args.pdf)} PDF...")
@@ -119,19 +124,19 @@ def main():
     samples = run_pipeline(testset, col, args.k)
 
     print("[4/4] Chấm điểm bằng RAGAS...")
-    api_key = rag_core.GEMINI_API_KEY
-    # Chủ động giới hạn tốc độ gọi (< 5 req/phút free tier) để KHÔNG bao giờ dính 429,
-    # thay vì để tenacity retry bị động rồi hết hạn ở RunConfig.timeout.
+    api_key = rag_core.OPENAI_API_KEY
+    # Billing đã bật -> quota per-minute cao hơn nhiều free tier, chỉ cần giữ tốc độ vừa
+    # phải để tránh burst quá lớn; retry ở RunConfig lo phần dự phòng lỗi mạng/quá tải.
     rate_limiter = InMemoryRateLimiter(
-        requests_per_second=4 / 60,
-        check_every_n_seconds=1,
-        max_bucket_size=1,
+        requests_per_second=5,
+        check_every_n_seconds=0.5,
+        max_bucket_size=10,
     )
     eval_llm = LangchainLLMWrapper(
-        ChatGoogleGenerativeAI(model=rag_core.LLM_MODEL, api_key=api_key, temperature=0, rate_limiter=rate_limiter)
+        ChatOpenAI(model=rag_core.LLM_MODEL, api_key=api_key, temperature=0, rate_limiter=rate_limiter)
     )
     eval_embeddings = LangchainEmbeddingsWrapper(
-        GoogleGenerativeAIEmbeddings(model=f"models/{rag_core.EMBED_MODEL}", google_api_key=api_key)
+        OpenAIEmbeddings(model=rag_core.EMBED_MODEL, api_key=api_key)
     )
     metrics = [
         Faithfulness(llm=eval_llm),
@@ -140,9 +145,9 @@ def main():
         LLMContextRecall(llm=eval_llm),
     ]
 
-    # max_workers=1: chạy tuần tự. timeout đủ lớn làm biên an toàn (rate_limiter ở trên
-    # mới là cơ chế chính ngăn 429, retry ở đây chỉ để dự phòng lỗi mạng thoáng qua).
-    run_config = RunConfig(max_workers=1, max_retries=5, max_wait=60, timeout=180)
+    # max_workers>1: chạy song song vì quota per-minute giờ đủ cao, rate_limiter ở trên
+    # vẫn là hàng rào chính ngăn burst quá lớn.
+    run_config = RunConfig(max_workers=4, max_retries=5, max_wait=60, timeout=180)
 
     dataset = EvaluationDataset(samples=samples)
     result = evaluate(dataset=dataset, metrics=metrics, run_config=run_config)
