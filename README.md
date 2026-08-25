@@ -1,4 +1,4 @@
-# 📄 PDF RAG Chatbot
+# 📄 RAGAS
 
 Chatbot hỏi đáp tài liệu PDF theo kiến trúc RAG (Retrieval-Augmented Generation), dùng **OpenAI API** cho cả embedding và sinh câu trả lời, **ChromaDB** làm vector store và **Streamlit** cho giao diện. Mọi câu trả lời đều kèm **trích dẫn nguồn** (tên file + số trang) và được **stream** theo từng chữ.
 
